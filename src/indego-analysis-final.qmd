@@ -1,0 +1,291 @@
+---
+title: "Indego Case Study"
+subtitle: "An MR Approach"
+author: "Nicholas Hatala"
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(showtext)
+
+# Load Montserrat from Google Fonts
+font_add_google("Montserrat", "Montserrat")
+showtext_auto()
+showtext_opts(dpi = 300)
+
+# Slide chart theme
+theme_slide <- function() {
+  theme_minimal(base_size = 14, base_family = "Montserrat") +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", margin = margin(b = 10)),
+      axis.title = element_text(size = 13),
+      axis.text = element_text(size = 11),
+      legend.text = element_text(size = 11),
+      legend.title = element_text(size = 12, face = "bold"),
+      legend.position = "top",
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.margin = margin(15, 15, 15, 15)
+    )
+}
+
+# Perpay-inspired color palette
+perpay_blue <- "#4B7CF5"
+perpay_dark <- "#1E3A8A"
+perpay_green <- "#22C55E"
+perpay_gray <- "#64748B"
+
+region_colors <- c(
+  "Center City" = "#4B7CF5",
+  "South Philly" = "#1E3A8A",
+  "West Philly" = "#22C55E",
+  "North Philly" = "#64748B"
+)
+
+metric_colors <- c(
+  "Trip Count" = "#4B7CF5",
+  "Trip Duration" = "#1E3A8A"
+)
+
+# Save helper for slide-ready PNGs
+save_slide <- function(plot, filename, width = 6.5, height = 5) {
+  ggsave(
+    filename,
+    plot = plot,
+    width = width, height = height, units = "in", dpi = 300,
+    bg = "white"
+  )
+}
+```
+
+## Data Loading
+
+```{r load-data}
+# Setting data directory
+data_dir <- "../data"
+
+# Loading data file string
+csv_files <- list.files(data_dir, pattern = "\\.csv$", full.names = TRUE) |>
+  str_subset("station", negate = TRUE)
+
+# Create function to load in data files
+read_indego <- function(path) {
+  df <- read_csv(path, show_col_types = FALSE, col_types = cols(.default = "c"))
+  names(df) <- names(df) |>
+    str_to_lower() |>
+    str_replace_all("\\s+", "_")
+  if ("start_station_id" %in% names(df)) {
+    df <- df |> rename(start_station = start_station_id, end_station = end_station_id)
+  }
+  if (!"bike_type" %in% names(df)) {
+    df <- df |> mutate(bike_type = NA_character_)
+  }
+  df
+}
+
+# Load in data files
+trips_raw <- map(csv_files, possibly(read_indego, otherwise = NULL)) |>
+  compact() |>
+  bind_rows()
+```
+
+## Data Cleaning
+
+```{r clean-data}
+# Cleaning data
+trips <- trips_raw |>
+  mutate(
+    # Making time data consistent
+    start_time = suppressWarnings(coalesce(mdy_hm(start_time), mdy_hms(start_time),
+                                           ymd_hms(start_time), ymd_hm(start_time))),
+    end_time = suppressWarnings(coalesce(mdy_hm(end_time), mdy_hms(end_time),
+                                         ymd_hms(end_time), ymd_hm(end_time))),
+    duration = as.numeric(duration),
+    # Pre-2017 Q2 files recorded duration in seconds; convert to minutes
+    duration = if_else(start_time < ymd("2017-04-01"), duration / 60, duration),
+    # Make sure numeric columns are, in fact, numeric
+    start_lat = as.numeric(start_lat),
+    start_lon = as.numeric(start_lon),
+    end_lat = as.numeric(end_lat),
+    end_lon = as.numeric(end_lon),
+    plan_duration = as.numeric(plan_duration),
+    # Create new time variables
+    year = year(start_time),
+    quarter = quarter(start_time),
+    year_quarter = paste0(year, " Q", quarter)
+  ) |>
+  filter(
+    !is.na(start_time), # Filter NA start times
+    !is.na(duration), # Filter NA duration times
+    duration > 0, # Make sure duration is > 0
+    duration < 1440, # Filter out trips of 24 hours or greater
+    year >= 2015 # Make sure year is 2015 and on (shouldn't be a problem)
+  ) |>
+  distinct(trip_id, .keep_all = TRUE) # De-duplicate trip IDs
+```
+
+## Station Data
+
+```{r load-stations}
+# Load station data
+stations <- read_csv("../data/indego-stations-2026-01-01.csv", show_col_types = FALSE)
+names(stations) <- names(stations) |> str_to_lower() |> str_replace_all("\\s+", "_")
+stations <- stations |> mutate(station_id = as.character(station_id))
+```
+
+---
+
+# Slide 1: How Should Decision Makers Quantify Growth?
+
+```{r quarterly-summary}
+# Create quarterly data frame
+quarterly <- trips |>
+  group_by(year, quarter, year_quarter) |>
+  summarise(
+    trip_count = n(), # Trip counts
+    total_duration_min = sum(duration, na.rm = TRUE), # Total duration minutes in period
+    avg_duration = mean(duration, na.rm = TRUE), # Average duration
+    .groups = "drop"
+  ) |>
+  arrange(year, quarter) |>
+  mutate(
+    revenue_proxy = total_duration_min,
+    trip_yoy = (trip_count / lag(trip_count, 4) - 1),
+    revenue_yoy = (revenue_proxy / lag(revenue_proxy, 4) - 1)
+  )
+```
+
+```{r growth-numbers}
+# Printing growth figures for plot
+q4_2025 <- quarterly |> filter(year == 2025, quarter == 4)
+
+cat("Q4 2025 Trip Duration YoY Growth:", percent(q4_2025$revenue_yoy, accuracy = 0.1), "\n")
+cat("Q4 2025 Trip Count YoY Growth:", percent(q4_2025$trip_yoy, accuracy = 0.1), "\n")
+cat("Q4 2025 Average Trip Duration:", round(q4_2025$avg_duration, 1), "min\n")
+```
+
+```{r slide1-yoy, fig.width=10, fig.height=5}
+# Creating YoY data
+yoy_data <- quarterly |>
+  filter(!is.na(trip_yoy), year >= 2017) |> # Filtering NA and year >= 2017 
+  select(year_quarter, trip_yoy, revenue_yoy) |>
+  pivot_longer(cols = c(trip_yoy, revenue_yoy), names_to = "metric", values_to = "growth") |>
+  mutate(metric = ifelse(metric == "trip_yoy", "Trip Count", "Trip Duration"))
+
+# Creating YoY line graph
+p_yoy <- yoy_data |>
+  ggplot(aes(x = factor(year_quarter), y = growth, color = metric, alpha = metric, group = metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_x_discrete(labels = function(x) ifelse(str_detect(x, "Q1"), x, " ")) +
+  scale_y_continuous(labels = percent) +
+  scale_color_manual(values = metric_colors) +
+  scale_alpha_manual(values = c("Trip Count" = 0.65, "Trip Duration" = 1), guide = "none") +
+  labs(x = NULL, y = "YoY Growth", color = NULL) +
+  theme_slide() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.ticks.x = element_line(),
+        axis.ticks.length.x = unit(5, "pt"))
+
+p_yoy
+save_slide(p_yoy, "../output/slide-yoy-growth.png", width = 5.5, height = 3.5)
+```
+
+```{r slide1-duration, fig.width=10, fig.height=5}
+# Creating duration data
+dur_data <- quarterly |> filter(year >= 2017)
+
+p_duration <- dur_data |>
+  ggplot(aes(x = factor(year_quarter), y = avg_duration)) +
+  geom_line(aes(group = 1), color = perpay_dark, linewidth = 1.2) +
+  geom_point(color = perpay_dark, size = 2.5) +
+  scale_x_discrete(labels = function(x) ifelse(str_detect(x, "Q1"), x, " ")) +
+  labs(x = NULL, y = "Average Duration (min)") +
+  theme_slide() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.ticks.x = element_line(),
+        axis.ticks.length.x = unit(5, "pt"))
+
+p_duration
+save_slide(p_duration, "../output/slide-avg-duration.png", width = 5.5, height = 3.5)
+```
+
+---
+
+# Slide 2: Is Indego Growing Too Fast or Too Slow?
+
+```{r regions}
+# Creating region column - rough approximations
+trips <- trips |>
+  mutate(
+    region = case_when(
+      start_lat < 39.9400 ~ "South Philly",
+      start_lon < -75.1900 ~ "West Philly",
+      start_lat > 39.9650 ~ "North Philly",
+      TRUE ~ "Center City"
+    )
+  )
+```
+
+```{r slide2-marginal-revenue, fig.width=10, fig.height=6}
+# Grouping trip data by station and adding region
+station_geo <- trips |>
+  filter(!is.na(start_lat), !is.na(start_lon)) |>
+  group_by(start_station) |>
+  summarise(lat = median(start_lat), lon = median(start_lon), .groups = "drop") |>
+  mutate(
+    region = case_when(
+      lat < 39.9400 ~ "South Philly",
+      lon < -75.1900 ~ "West Philly",
+      lat > 39.9650 ~ "North Philly",
+      TRUE ~ "Center City"
+    )
+  )
+
+# Cleaning station go-live dates
+station_dates <- stations |>
+  mutate(go_live = suppressWarnings(mdy(day_of_go_live_date))) |>
+  select(station_id, station_name, go_live)
+
+# Creating data set for MR analysis
+station_mr <- trips |>
+  filter(year == 2025) |> # Filtering data for 2025
+  group_by(start_station) |> # Grouping by start_station
+  summarise(total_duration = sum(duration, na.rm = TRUE), .groups = "drop") |> # Summing duration
+  inner_join(station_geo, by = "start_station") |> # Adding region to station
+  inner_join(station_dates, by = c("start_station" = "station_id")) |> # Adding station go-live dates
+  filter(go_live < ymd("2025-01-01")) |> # Only including stations that went live BEFORE 2025
+  arrange(region, go_live) |> # Arranging by region, and go-live date
+  group_by(region) |> # Grouping by region
+  mutate(station_rank = row_number()) |> # Creating station rank based on row number from grouping
+  ungroup() # Ungroup
+
+# Creating MR plot
+p_mr <- station_mr |>
+  ggplot(aes(x = go_live, y = total_duration / 60, color = region)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.2) +
+  scale_y_continuous(labels = comma) +
+  scale_color_manual(values = region_colors) +
+  labs(title = "2025 Station Duration Hours by Deployment Date", 
+       x = "Station Go-Live Date", 
+       y = "Trip Duration Hours (2025)", 
+       color = "Region\u00B9") +
+  theme_slide() +
+  theme(plot.title = element_text(face = "plain", size = 13))
+
+p_mr
+save_slide(p_mr, "../output/slide-marginal-revenue.png", width = 7, height = 5)
+```
+
